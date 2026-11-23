@@ -10,9 +10,10 @@ const REPO = "BLK-TTAUDI/OXRPY";
 const DIR = new URL("../test/fixtures/", import.meta.url);
 const check = process.argv.includes("--check");
 
-const listing = await fetch(`https://api.github.com/repos/${REPO}/contents/fixtures?ref=main`, {
-  headers: { Accept: "application/vnd.github+json", "User-Agent": "oxrpy-js-fixtures" },
-});
+// GitHub limits anonymous API calls per IP, and CI runners share IPs, so use a token when there is one.
+const headers = { Accept: "application/vnd.github+json", "User-Agent": "oxrpy-js-fixtures" };
+if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+const listing = await fetch(`https://api.github.com/repos/${REPO}/contents/fixtures?ref=main`, { headers });
 if (!listing.ok) throw new Error(`Couldn't list ${REPO}/fixtures: HTTP ${listing.status}`);
 const files = (await listing.json()).filter((f) => f.type === "file" && f.name.endsWith(".json"));
 
