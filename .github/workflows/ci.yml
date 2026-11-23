@@ -51,5 +51,15 @@ jobs:
         run: |
           pkg="v$(node -p "require('./package.json').version")"
           test "$pkg" = "${GITHUB_REF_NAME}" || { echo "Tag ${GITHUB_REF_NAME} != package.json $pkg"; exit 1; }
+      - name: Already on npm?
+        id: published
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "oxrpy@${version}" version >/dev/null 2>&1; then
+            echo "::notice::oxrpy ${version} is already on npm (published by hand), so there's nothing to publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
       - run: npm run build
+        if: steps.published.outputs.skip != 'true'
       - run: npm publish --access public --provenance
+        if: steps.published.outputs.skip != 'true'
