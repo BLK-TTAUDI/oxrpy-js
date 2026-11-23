@@ -23,7 +23,9 @@ import type {
 } from "./types.js";
 
 export type AuditCategory = (typeof AUDIT_CATEGORIES)[number];
-type Limiter = "data" | "get" | "command";
+/** The kinds of request Oxford rate-limits separately: `GET /v1/server`, other reads, and commands. */
+export type RequestKind = "data" | "get" | "command";
+type Limiter = RequestKind;
 
 export interface ClientOptions {
   /** Your server's API key (Server Management > External > API Key). */
@@ -339,7 +341,7 @@ export class OxfordAPI {
   }
 
   /** Oxford's latest rate limit figures per kind of request: `data` (`GET /v1/server`), `get` and `command`. */
-  get rateLimitStatus(): Partial<Record<Limiter, RateLimitInfo>> {
+  get rateLimitStatus(): Partial<Record<RequestKind, RateLimitInfo>> {
     return structuredClone(this.rateLimits);
   }
 

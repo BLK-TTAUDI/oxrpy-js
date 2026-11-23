@@ -5,7 +5,7 @@
 
 export { OxfordAPI } from "./client.js";
 export type {
-  AuditCategory, ClientOptions, CommandOptions, RateLimitInfo, RequestInfo, RunForeverOptions, ServerDataOptions,
+  AuditCategory, ClientOptions, CommandOptions, RateLimitInfo, RequestInfo, RequestKind, RunForeverOptions, ServerDataOptions,
   ServerDataResponse,
 } from "./client.js";
 export { ServerPool, type PoolOptions, type PoolRunOptions } from "./pool.js";
