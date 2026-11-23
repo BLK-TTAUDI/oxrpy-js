@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+Nothing in this release should break existing code.
+
+- **The `oxrpy` command:** `npx oxrpy status`, `npx oxrpy server` and `npx oxrpy players`, with
+  `--json` for the raw data. The same commands as the Python version's `oxrpy`.
+- **Examples:** ready-to-run discord.js bots (a kill feed with `!players`, and server
+  status), a join/leave log, and a staff sync. They're checked against discord.js and oxrpy
+  itself, so they keep working.
+- **Shared tests with the Python version:** both wrappers now run the same set of sample API
+  responses and expected results, so they can't drift apart.
+
 ## 0.1.0
 
 The first release: the JavaScript and TypeScript version of

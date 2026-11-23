@@ -254,6 +254,38 @@ Errors are `OxfordAPIError` or one of its subclasses: `AuthenticationError`, `Ba
 *"403: Invalid API key (hint: Check the key in Server Management > External > API Key…)"*.
 
 <!-- --8<-- [end:limits-and-errors] -->
+<!-- --8<-- [start:cli] -->
+## From the command line
+
+oxrpy comes with an `oxrpy` command for quick checks. Run it with `npx`, no install needed:
+
+```
+npx oxrpy status       # is the Oxford API up? (no key needed)
+npx oxrpy server       # your server's name, player count, join code and packages
+npx oxrpy players      # who's in your server
+```
+
+`server` and `players` read your key from the `OXFD_SERVER_KEY` environment variable. Add
+`--json` to any of them to get the raw data.
+
+<!-- --8<-- [end:cli] -->
+<!-- --8<-- [start:examples] -->
+## Examples
+
+The [examples folder](https://github.com/BLK-TTAUDI/oxrpy-js/tree/main/examples) has scripts you
+can copy and run:
+
+- [discord-kill-feed.mjs](https://github.com/BLK-TTAUDI/oxrpy-js/blob/main/examples/discord-kill-feed.mjs)
+  is a discord.js bot that posts kills to a channel and answers `!players`.
+- [discord-server-status.mjs](https://github.com/BLK-TTAUDI/oxrpy-js/blob/main/examples/discord-server-status.mjs)
+  is a discord.js bot that posts when the server goes offline, comes back or restarts, and shows
+  the player count as its status.
+- [join-leave-log.mjs](https://github.com/BLK-TTAUDI/oxrpy-js/blob/main/examples/join-leave-log.mjs)
+  prints joins, leaves, kills and the server going up or down. No Discord needed.
+- [sync-staff-from-list.mjs](https://github.com/BLK-TTAUDI/oxrpy-js/blob/main/examples/sync-staff-from-list.mjs)
+  keeps staff ranks matching a list, and shows you the changes before making them.
+
+<!-- --8<-- [end:examples] -->
 <!-- --8<-- [start:security] -->
 ## Security
 

@@ -1,10 +1,13 @@
 {
   "name": "oxrpy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "JavaScript/TypeScript wrapper for the Oxford Response private server API",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "oxrpy": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -27,7 +30,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
-    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "fixtures": "node scripts/sync-fixtures.mjs"
   },
   "keywords": [
     "oxford response",
