@@ -2,6 +2,7 @@
 
 **Documentation: [oxrpy.org](https://oxrpy.org)**
 
+<!-- --8<-- [start:intro] -->
 A JavaScript and TypeScript wrapper for the
 [Oxford Response private server API](https://docs.oxfd.re/). Use it to read what's happening on
 your server and run commands on it from your own bot, website backend or tool. It's the
@@ -14,6 +15,8 @@ npm install oxrpy
 You'll need Node.js 20.19 or newer (or Bun or Deno). It has no dependencies, and it works with
 both `import` and `require()`.
 
+<!-- --8<-- [end:intro] -->
+<!-- --8<-- [start:getting-started] -->
 ## Getting started
 
 You'll need your server's API key. The server owner can find it in **Server Management >
@@ -44,6 +47,8 @@ Keep your key private. Anyone who has it can run commands on your server, change
 and ban people. Keep it on your own machine or bot. oxrpy refuses to run in a web browser for
 this reason: a key in website code can be read by anyone.
 
+<!-- --8<-- [end:getting-started] -->
+<!-- --8<-- [start:reading-data] -->
 ## Reading data
 
 `getServerData()` asks for any mix of sections in one request (names aren't case-sensitive).
@@ -97,6 +102,8 @@ await api.findVehicle("rj75flk");      // by plate (spaces and case don't matter
 
 If a name matches several people, `findPlayer` throws `AmbiguousMatchError`, with `.matches`.
 
+<!-- --8<-- [end:reading-data] -->
+<!-- --8<-- [start:events] -->
 ## Reacting to events
 
 ```js
@@ -141,6 +148,8 @@ for await (const { data, fresh } of api.follow(["Events", "KillLogs"])) {
 }
 ```
 
+<!-- --8<-- [end:events] -->
+<!-- --8<-- [start:commands] -->
 ## Running commands
 
 ```js
@@ -192,6 +201,8 @@ console.log(await api.planStaffSync({ 81234401: "Admin" }));   // see the change
 Only the changes are sent. Users are identified by Roblox user ID, and the owner is never
 touched.
 
+<!-- --8<-- [end:commands] -->
+<!-- --8<-- [start:many-servers] -->
 ## Many servers in one app
 
 ```js
@@ -217,6 +228,8 @@ await pool.runForever({ saveDir: "positions" });
 - **Everything at once:** `pool.each(api => ...)` and `pool.runCommandOnAll(...)` act on every
   server.
 
+<!-- --8<-- [end:many-servers] -->
+<!-- --8<-- [start:map] -->
 ## Maps and positions
 
 ```js
@@ -227,6 +240,8 @@ map.fromPixels(800, 600, { width: 1630, height: 1260 });         // a click → 
 map.distance(a.Position, b.Position);
 ```
 
+<!-- --8<-- [end:map] -->
+<!-- --8<-- [start:limits-and-errors] -->
 ## Rate limits and errors
 
 oxrpy paces requests to Oxford's limits (one `GET /v1/server` a second with a server key) and
@@ -238,6 +253,8 @@ Errors are `OxfordAPIError` or one of its subclasses: `AuthenticationError`, `Ba
 `.status`, `.code`, `.apiMessage` and, where there's an obvious fix, a `.hint`, for example:
 *"403: Invalid API key (hint: Check the key in Server Management > External > API Key…)"*.
 
+<!-- --8<-- [end:limits-and-errors] -->
+<!-- --8<-- [start:security] -->
 ## Security
 
 - **Redirects are never followed,** so your key can't be sent to another site.
@@ -246,6 +263,9 @@ Errors are `OxfordAPIError` or one of its subclasses: `AuthenticationError`, `Ba
 - **No running in a web browser** unless you pass `allowBrowser: true`.
 - **No dependencies,** so nothing extra comes along when you install it.
 
+<!-- --8<-- [end:security] -->
+<!-- --8<-- [start:license] -->
 ## License
 
 Proprietary. See the [LICENSE](https://github.com/BLK-TTAUDI/oxrpy-js/blob/main/LICENSE) file.
+<!-- --8<-- [end:license] -->
