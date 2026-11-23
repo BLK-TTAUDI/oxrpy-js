@@ -9,14 +9,14 @@ export type {
   ServerDataResponse,
 } from "./client.js";
 export { ServerPool, type PoolOptions, type PoolRunOptions } from "./pool.js";
-export { LogFollower, type FollowOptions, type IterateOptions, type Poll } from "./follower.js";
+export { LogFollower, type FollowOptions, type IterateOptions, type Poll, type ServerDataSource } from "./follower.js";
 export { LiveState } from "./live.js";
 export { FileState, type SavedState, type StateStore } from "./state.js";
 export { TokenBucket } from "./ratelimit.js";
 export type { EventKey, EventMap } from "./events.js";
 export {
   AmbiguousMatchError, AuthenticationError, BadRequestError, CommandFailedError, EndpointRemovedError,
-  NotFoundError, OxfordAPIError, RateLimitError, ServerOfflineError,
+  NotFoundError, OxfordAPIError, RateLimitError, ServerOfflineError, type ErrorDetails,
 } from "./errors.js";
 export { commands, formatDuration, TEAMS, type Duration, type Target, type Team } from "./commands.js";
 export { AUDIT_CATEGORIES, BASE_URL, LOG_SECTIONS, SECTIONS, VERSION, type LogSection, type Section } from "./constants.js";

@@ -9,7 +9,8 @@ export const MAP_TOP_LEFT = [-6700, -2500] as const;
 export const MAP_BOTTOM_RIGHT = [1450, 3800] as const;
 export const MAP_IMAGE_SIZE = [8151, 6301] as const;
 
-type Point = readonly number[] | null | undefined;
+/** A position: `[x, y, z]` or `[x, z]`. */
+export type Point = readonly number[] | null | undefined;
 
 function xz(position: Point): [number, number] {
   if (!position) throw new TypeError("position is missing (the player hasn't spawned, or the server is offline)");

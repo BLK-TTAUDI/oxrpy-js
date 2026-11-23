@@ -51,6 +51,7 @@ export interface Poll {
 }
 
 /** Anything that can fetch `GET /v1/server` (the client). */
+/** Anything that can fetch `GET /v1/server` (the client). */
 export interface ServerDataSource {
   getServerData(sections?: string[], options?: { since?: number; limit?: number }): Promise<ServerData | null>;
 }
