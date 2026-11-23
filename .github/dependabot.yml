@@ -1,0 +1,12 @@
+# Opens a pull request when a GitHub Action or a dev tool has an update (including security
+# fixes). The package itself has no runtime dependencies.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly

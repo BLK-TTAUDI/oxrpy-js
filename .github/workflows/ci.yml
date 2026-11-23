@@ -1,0 +1,55 @@
+name: Test and publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+# Jobs only get read access unless they ask for more (only publish does, for npm).
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ["20", "22", "24"]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  publish:
+    # Only on a version tag, e.g. `git tag v0.1.0 && git push origin v0.1.0`
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/oxrpy
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing: no npm token stored anywhere
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - name: Tag matches package version
+        run: |
+          pkg="v$(node -p "require('./package.json').version")"
+          test "$pkg" = "${GITHUB_REF_NAME}" || { echo "Tag ${GITHUB_REF_NAME} != package.json $pkg"; exit 1; }
+      - run: npm run build
+      - run: npm publish --access public --provenance
