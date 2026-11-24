@@ -60,6 +60,18 @@ export interface ServerDataOptions {
   auditUser?: string | number;
   /** A previous response's `etag`: resolves `null` if nothing changed. */
   ifNoneMatch?: string;
+  /**
+   * Wait behind your own requests for a rate limit slot, for as long as it takes. Polling uses
+   * this, so a Discord command's lookup isn't stuck behind hundreds of servers' polls.
+   */
+  background?: boolean;
+  /** Give up when this aborts (while waiting for a rate limit slot, or for the answer). */
+  signal?: AbortSignal;
+}
+
+export interface CachedReadOptions {
+  /** Answer from `api.latest` without a request if it's at most this many seconds old. */
+  maxAge?: number;
 }
 
 /** The JSON from `GET /v1/server`, plus its ETag. */
@@ -106,6 +118,9 @@ interface Spec {
   timeout?: number;
   url?: string;
   serverData?: boolean;
+  /** 0 for your own requests, 1 for background polling (waits behind them, with no time limit). */
+  priority?: number;
+  signal?: AbortSignal;
 }
 
 const isBrowser = () => typeof window !== "undefined" && typeof (globalThis as { document?: unknown }).document !== "undefined";
@@ -171,6 +186,10 @@ export class OxfordAPI {
   limiters: Record<Limiter, TokenBucket | undefined>;
   /** @internal an extra limit shared with other clients (the pool's 30/s per IP) */
   ipBucket?: TokenBucket;
+  /** @internal the priority for requests with none of their own (ServerPool.each uses 1) */
+  defaultPriority = 0;
+  /** With an app key on "auto", follow the limits Oxford reports (custom tiers differ). */
+  private readonly followLimits: boolean;
   private readonly handlers = new Handlers<Handler<any>>();
   private readonly requestHooks: Array<(info: RequestInfo) => unknown> = [];
   private readonly rateLimits: Partial<Record<Limiter, RateLimitInfo>> = {};
@@ -199,6 +218,7 @@ export class OxfordAPI {
     this.headers = { "server-key": options.serverKey, Accept: "application/json", "User-Agent": USER_AGENT };
     if (options.appKey) this.headers.Authorization = `Bearer ${options.appKey}`;
     this.limiters = this.makeLimiters(options.rateLimit ?? "auto");
+    this.followLimits = (options.rateLimit ?? "auto") === "auto" && this.hasAppKey;
   }
 
   private makeLimiters(rateLimit: "auto" | "none" | number): Record<Limiter, TokenBucket | undefined> {
@@ -224,11 +244,23 @@ export class OxfordAPI {
     let url = spec.url ?? `${this.baseUrl}${spec.path}`;
     if (spec.params) url += `?${new URLSearchParams(spec.params)}`;
     let attempt = 0;
+    // Background polling waits its turn behind requests you make yourself, for as long as it
+    // takes: with thousands of servers on one limit, a long queue is expected.
+    const priority = spec.priority ?? this.defaultPriority;
+    const wait = { priority, timeoutMs: priority > 0 ? undefined : 60_000, signal: spec.signal };
+    const stopped = () => new OxfordAPIError(`${spec.method} ${spec.path} was stopped`);
     for (;;) {
-      if (bucket && !(await bucket.acquire(60_000))) throw new RateLimitError(`Timed out waiting for a rate limit slot for ${spec.path}`);
-      if (this.ipBucket && !(await this.ipBucket.acquire(60_000))) throw new RateLimitError(`Timed out waiting for a rate limit slot for ${spec.path}`);
+      if (bucket && !(await bucket.acquire(wait))) {
+        if (spec.signal?.aborted) throw stopped();
+        throw new RateLimitError(`Timed out waiting for a rate limit slot for ${spec.path}`);
+      }
+      if (this.ipBucket && !(await this.ipBucket.acquire(wait))) {
+        if (spec.signal?.aborted) throw stopped();
+        throw new RateLimitError(`Timed out waiting for a rate limit slot for ${spec.path}`);
+      }
       const started = performance.now();
       let response: Response;
+      const timeout = AbortSignal.timeout((spec.timeout ?? this.timeout) * 1000);
       try {
         response = await this.fetchImpl(url, {
           method: spec.method,
@@ -236,9 +268,10 @@ export class OxfordAPI {
           body: spec.body !== undefined ? JSON.stringify(spec.body) : undefined,
           // Never followed: a redirect elsewhere would carry the server key with it.
           redirect: "manual",
-          signal: AbortSignal.timeout((spec.timeout ?? this.timeout) * 1000),
+          signal: spec.signal ? AbortSignal.any([timeout, spec.signal]) : timeout,
         });
       } catch (err) {
+        if (spec.signal?.aborted) throw stopped();
         // Commands may have run, so only reads are retried.
         const retry = spec.method === "GET" && attempt < this.maxRetries;
         this.afterAttempt(spec, undefined, undefined, started, attempt, err, retry);
@@ -279,10 +312,20 @@ export class OxfordAPI {
     return undefined;
   }
 
+  /** Follow the steady rate Oxford reports (`X-RateLimit-Limit`), so custom app tiers just work. */
+  private adoptLimit(kind: Limiter, limit: number | undefined): void {
+    const bucket = this.limiters[kind];
+    if (!bucket || !limit || limit <= 0 || Math.abs(limit - bucket.rate) <= bucket.rate * 0.01) return;
+    bucket.setRate(limit, limit * (kind === "command" ? 2.5 : 2));
+  }
+
   private afterAttempt(spec: Spec, status: number | undefined, headers: Headers | undefined, started: number,
     attempt: number, error: unknown, willRetry: boolean): void {
     const rateLimit = headers ? rateLimitHeaders(headers) : undefined;
-    if (rateLimit) this.rateLimits[spec.limiter] = { ...rateLimit, At: Date.now() };
+    if (rateLimit) {
+      this.rateLimits[spec.limiter] = { ...rateLimit, At: Date.now() };
+      if (this.followLimits) this.adoptLimit(spec.limiter, rateLimit.Limit);
+    }
     if (!this.requestHooks.length) return;
     const info: RequestInfo = {
       method: spec.method, path: spec.path, status, elapsed: (performance.now() - started) / 1000,
@@ -361,6 +404,7 @@ export class OxfordAPI {
     return {
       method: "GET", path: "/server", limiter: "data", params, serverData: true,
       headers: o.ifNoneMatch ? { "If-None-Match": o.ifNoneMatch } : undefined,
+      priority: o.background ? 1 : undefined, signal: o.signal,
     };
   }
 
@@ -373,8 +417,10 @@ export class OxfordAPI {
     return this.request(this.serverDataSpec(sections, options));
   }
 
-  private async section<T>(name: string, options: ServerDataOptions = {}): Promise<T> {
-    const data = await this.request<ServerData>(this.serverDataSpec([name], options));
+  private async section<T>(name: string, options: ServerDataOptions & CachedReadOptions = {}): Promise<T> {
+    const { maxAge = 0, ...rest } = options;
+    if (maxAge > 0 && this.latest.isFresh(name, maxAge)) return (this.latest.get(name) ?? null) as T;
+    const data = await this.request<ServerData>(this.serverDataSpec([name], rest));
     return (data?.[name] ?? null) as T;
   }
 
@@ -387,18 +433,21 @@ export class OxfordAPI {
     return Boolean((await this.getServer()).Online);
   }
 
-  /** Everyone in the server (`null` while offline). */
-  getPlayers(): Promise<Player[] | null> { return this.section("Players"); }
+  /**
+   * Everyone in the server (`null` while offline). Like the other live helpers, pass `{ maxAge }`
+   * to answer from `api.latest` without a request when it's that fresh.
+   */
+  getPlayers(options: CachedReadOptions = {}): Promise<Player[] | null> { return this.section("Players", options); }
   getTracks(): Promise<Tracks | null> { return this.section("Tracks"); }
-  getVehicles(): Promise<Vehicle[] | null> { return this.section("Vehicles"); }
-  getWorld(): Promise<World | null> { return this.section("World"); }
-  getTeams(): Promise<Teams | null> { return this.section("Teams"); }
-  getQueue(): Promise<QueueEntry[] | null> { return this.section("Queue"); }
-  getRobberies(): Promise<Robbery[] | null> { return this.section("Robberies"); }
-  getAtms(): Promise<Atm[] | null> { return this.section("Atms"); }
-  getIncidents(): Promise<Incidents | null> { return this.section("Incidents"); }
-  getStaff(): Promise<Staff | null> { return this.section("Staff"); }
-  getGroups(): Promise<Group[] | null> { return this.section("Groups"); }
+  getVehicles(options: CachedReadOptions = {}): Promise<Vehicle[] | null> { return this.section("Vehicles", options); }
+  getWorld(options: CachedReadOptions = {}): Promise<World | null> { return this.section("World", options); }
+  getTeams(options: CachedReadOptions = {}): Promise<Teams | null> { return this.section("Teams", options); }
+  getQueue(options: CachedReadOptions = {}): Promise<QueueEntry[] | null> { return this.section("Queue", options); }
+  getRobberies(options: CachedReadOptions = {}): Promise<Robbery[] | null> { return this.section("Robberies", options); }
+  getAtms(options: CachedReadOptions = {}): Promise<Atm[] | null> { return this.section("Atms", options); }
+  getIncidents(options: CachedReadOptions = {}): Promise<Incidents | null> { return this.section("Incidents", options); }
+  getStaff(options: CachedReadOptions = {}): Promise<Staff | null> { return this.section("Staff", options); }
+  getGroups(options: CachedReadOptions = {}): Promise<Group[] | null> { return this.section("Groups", options); }
   getSettings(): Promise<Settings | null> { return this.section("Settings"); }
   /** One page of bans: `{ Total, Offset, List }`. See `iterBans`. */
   getBans(options: { limit?: number; offset?: number } = {}): Promise<BansPage | null> { return this.section("Bans", options); }
@@ -704,7 +753,7 @@ export class OxfordAPI {
   async run(
     handlers: Handlers<any>,
     invoke: (fn: any, arg: unknown) => unknown,
-    options: RunForeverOptions & { onError?: (err: OxfordAPIError) => unknown },
+    options: RunForeverOptions & { onError?: (err: OxfordAPIError) => unknown; onPoll?: (data: ServerData) => unknown },
   ): Promise<void> {
     const follower = new LogFollower(this, handlers.logsNeeded(), options);
     // Load any saved position before deciding whether to skip the backlog.
@@ -723,6 +772,7 @@ export class OxfordAPI {
       for (const fn of handlers.get("error")) await call(fn, err);
     };
     for await (const { data, fresh } of follower.iterate({ signal: options.signal, onError })) {
+      options.onPoll?.(data);
       for (const [fn, arg] of dispatchPlan(handlers, watcher, data, fresh, skip)) await call(fn, arg);
       skip = false;
     }

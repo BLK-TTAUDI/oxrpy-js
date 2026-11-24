@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+Nothing in this release should break existing code.
+
+### For apps that follow many servers
+
+- **Fair turns:** `ServerPool` shares the rate limit between servers in turn, instead of
+  every server racing for each free slot. Nobody's left behind, however many servers there are.
+- **Your own requests first:** requests you make yourself (a Discord command's lookup) go ahead
+  of background polling, with a single client too. `pool.each()` and
+  `pool.runCommandOnAll()` wait behind them.
+- **`pool.stats`:** how the pool is keeping up, overall and per server (`PoolStats`,
+  `ServerStats`), including how often each server is really being checked.
+- **`pool.verify(key)`:** checks a server key (for a `/link` command) and returns the server's
+  details, without adding it.
+- **`pool.updateKey(name, key)`:** swaps in a new key and carries on where it stopped.
+- **Limits that follow Oxford:** with an app key, the limits Oxford reports are used, so custom
+  tiers work without settings.
+- **`{ maxAge }` on every live helper** (`getPlayers`, `getVehicles`, `getStaff`...): answers
+  from `api.latest` without a request when it's that fresh.
+- **Quick shutdown:** stopping a pool stops every server at once, and polls still waiting for
+  their turn are dropped instead of being sent first.
+
 ## 0.2.0
 
 Nothing in this release should break existing code.

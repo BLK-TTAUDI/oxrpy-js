@@ -5,14 +5,14 @@
 
 export { OxfordAPI } from "./client.js";
 export type {
-  AuditCategory, ClientOptions, CommandOptions, RateLimitInfo, RequestInfo, RequestKind, RunForeverOptions, ServerDataOptions,
+  AuditCategory, ClientOptions, CommandOptions, RateLimitInfo, RequestInfo, RequestKind, RunForeverOptions, ServerDataOptions, CachedReadOptions,
   ServerDataResponse,
 } from "./client.js";
-export { ServerPool, type PoolOptions, type PoolRunOptions } from "./pool.js";
+export { ServerPool, type PoolOptions, type PoolRunOptions, type PoolStats, type ServerStats } from "./pool.js";
 export { LogFollower, type FollowOptions, type IterateOptions, type Poll, type ServerDataSource } from "./follower.js";
 export { LiveState } from "./live.js";
 export { FileState, type SavedState, type StateStore } from "./state.js";
-export { TokenBucket } from "./ratelimit.js";
+export { TokenBucket, type AcquireOptions } from "./ratelimit.js";
 export type { EventKey, EventMap } from "./events.js";
 export {
   AmbiguousMatchError, AuthenticationError, BadRequestError, CommandFailedError, EndpointRemovedError,

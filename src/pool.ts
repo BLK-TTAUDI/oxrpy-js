@@ -19,7 +19,7 @@ import type { OxfordAPIError } from "./errors.js";
 import { Handlers, type EventKey, type EventMap } from "./events.js";
 import { isPermanent } from "./follower.js";
 import { TokenBucket } from "./ratelimit.js";
-import type { Event } from "./types.js";
+import type { Event, ServerData, ServerInfo } from "./types.js";
 
 /** Every request from one IP address, whatever the key: 30 a second. */
 export const IP_REQUESTS_PER_SECOND = 30;
@@ -39,6 +39,46 @@ export interface PoolRunOptions {
   /** The slowest a quiet server is polled, in seconds (default 5). */
   maxIdle?: number;
   signal?: AbortSignal;
+}
+
+/** How one server in the pool is doing. See `ServerPool.stats`. */
+export interface ServerStats {
+  /** Successful polls since the server was added. */
+  polls: number;
+  /** Failed polls in a row (0 while all is well). */
+  errors: number;
+  /** When the last successful poll was (ms since 1970), or `undefined` before the first. */
+  lastPoll?: number;
+  /** Seconds between polls lately: how out of date this server's events and data can be. */
+  interval?: number;
+  /** Whether the server was online at the last poll. */
+  online?: boolean;
+  /** Players in the server at the last poll. */
+  players?: number;
+  /** Why following stopped for good (e.g. the key was regenerated). */
+  failed?: unknown;
+}
+
+/** How the whole pool is doing: `pool.stats`. Use it to check the pool keeps up, or to tell your users how fresh their data is. */
+export interface PoolStats {
+  /** Servers in the pool. */
+  servers: number;
+  /** Servers being followed right now (`runForever` running and not failed). */
+  following: number;
+  /** Servers whose following stopped for good. */
+  failed: number;
+  /** Reads a second the pool keeps to across every server, or `undefined` with no limit. */
+  readLimit?: number;
+  /** Requests sent a second, over the last 10 seconds. */
+  requestsPerSecond: number;
+  /** Requests queued for a rate limit slot right now. */
+  waiting: number;
+  /** The average of the servers' `interval`: typical seconds between updates. */
+  averageInterval?: number;
+  /** The longest `interval`: the most out of date any server gets. */
+  slowestInterval?: number;
+  /** Each server's stats, by name. */
+  perServer: Record<string, ServerStats>;
 }
 
 /** A safe file name for a server's position; changed names get a short hash so they never collide. */
@@ -63,6 +103,8 @@ export class ServerPool {
   private readonly running = new Map<string, { controller: AbortController; done: Promise<void> }>();
   private runOptions?: PoolRunOptions;
   private stopController?: AbortController;
+  private readonly serverStats = new Map<string, ServerStats>();
+  private readonly sent: number[] = [];
 
   constructor(options: PoolOptions = {}) {
     this.options = options;
@@ -80,11 +122,55 @@ export class ServerPool {
    */
   add(name: string, serverKey: string): OxfordAPI {
     if (this.servers.has(name)) throw new RangeError(`There's already a server called '${name}' in the pool`);
+    const api = this.client(serverKey);
+    this.servers.set(name, api);
+    this.serverStats.set(name, { polls: 0, errors: 0 });
+    this.failed.delete(name);
+    if (this.runOptions) this.start(name);
+    return api;
+  }
+
+  /** A client for one server, sharing the pool's rate limits. */
+  private client(serverKey: string): OxfordAPI {
     const api = new OxfordAPI({ ...this.options, serverKey });
     if (this.sharedLimiters) api.limiters = this.sharedLimiters;
     api.ipBucket = this.ipBucket;
+    api.onRequest((info) => {
+      if (info.status === undefined) return;
+      this.sent.push(performance.now());
+      if (this.sent.length > 100_000) this.sent.splice(0, this.sent.length - 100_000);
+    });
+    return api;
+  }
+
+  /**
+   * Check a server key before you save it, e.g. in a `/link` command. Resolves the server's details
+   * (`Name`, `OwnerId`, `CurrentPlayers`…), so you can show which server it is. Uses the pool's
+   * rate limits; doesn't add the server.
+   * @throws AuthenticationError if the key is wrong, was regenerated, or the server doesn't have the API package.
+   */
+  async verify(serverKey: string): Promise<ServerInfo> {
+    return (await this.client(serverKey).getServer()).Server as ServerInfo;
+  }
+
+  /**
+   * Swap in a new server key for `name`, e.g. after the owner regenerated theirs. Following carries
+   * on from where it was (from `saveDir` if you use one), and the server leaves `failed`.
+   * Resolves the new client.
+   */
+  async updateKey(name: string, serverKey: string): Promise<OxfordAPI> {
+    const old = this.servers.get(name);
+    if (!old) throw new RangeError(`No server called '${name}' in the pool`);
+    await this.stopServer(name);
+    const api = this.client(serverKey);
+    (api as { latest: OxfordAPI["latest"] }).latest = old.latest; // keep what's known, with its real age
+    api.cursor = old.cursor;
     this.servers.set(name, api);
     this.failed.delete(name);
+    const stats = this.serverStats.get(name) ?? { polls: 0, errors: 0 };
+    stats.failed = undefined;
+    stats.errors = 0;
+    this.serverStats.set(name, stats);
     if (this.runOptions) this.start(name);
     return api;
   }
@@ -94,6 +180,7 @@ export class ServerPool {
     if (!this.servers.delete(name)) throw new RangeError(`No server called '${name}' in the pool`);
     await this.stopServer(name);
     this.failed.delete(name);
+    this.serverStats.delete(name);
   }
 
   get(name: string): OxfordAPI | undefined {
@@ -117,7 +204,10 @@ export class ServerPool {
    * failed has its error instead (one failure doesn't stop the others).
    */
   async each<T>(action: (api: OxfordAPI) => Promise<T>, names = this.names): Promise<Record<string, T | Error>> {
-    const results = await Promise.allSettled(names.map((n) => action(this.servers.get(n)!)));
+    // Each server's client, but with requests that wait behind single ones (a Discord command's
+    // lookup, say), so one big job across every server doesn't hold up everyone else's.
+    const behind = (api: OxfordAPI) => Object.assign(Object.create(api) as OxfordAPI, { defaultPriority: 1 });
+    const results = await Promise.allSettled(names.map((n) => action(behind(this.servers.get(n)!))));
     return Object.fromEntries(names.map((n, i) => {
       const r = results[i];
       return [n, r.status === "fulfilled" ? r.value : (r.reason as Error)];
@@ -162,6 +252,43 @@ export class ServerPool {
     this.stopController?.abort();
   }
 
+  /**
+   * Reads a second the pool keeps to across every server (`undefined`: no limit). Without an app
+   * key that's the per-IP limit; with one, your app's limit (which follows what Oxford reports, so
+   * custom tiers are picked up), capped by the per-IP limit.
+   */
+  get readLimit(): number | undefined {
+    const rates = [this.sharedLimiters?.data?.rate, this.ipBucket?.rate].filter((r): r is number => r !== undefined);
+    return rates.length ? Math.min(...rates) : undefined;
+  }
+
+  /**
+   * How the pool is keeping up: overall figures, and each server's stats in `perServer`.
+   *
+   * ```ts
+   * const { following, averageInterval } = pool.stats;
+   * console.log(`${following} servers, updated about every ${averageInterval?.toFixed(1)}s`);
+   * ```
+   */
+  get stats(): PoolStats {
+    const since = performance.now() - 10_000;
+    const recent = this.sent.filter((t) => t >= since).length;
+    const all = [...this.serverStats.values()];
+    const intervals = all.filter((s) => s.interval !== undefined && s.failed === undefined).map((s) => s.interval!);
+    const buckets = [this.sharedLimiters?.data, this.ipBucket].filter((b) => b !== undefined);
+    return {
+      servers: this.servers.size,
+      following: [...this.running.keys()].filter((n) => !this.failed.has(n)).length,
+      failed: this.failed.size,
+      readLimit: this.readLimit,
+      requestsPerSecond: recent / 10,
+      waiting: Math.max(0, ...buckets.map((b) => b!.waiting)),
+      averageInterval: intervals.length ? intervals.reduce((a, b) => a + b, 0) / intervals.length : undefined,
+      slowestInterval: intervals.length ? Math.max(...intervals) : undefined,
+      perServer: Object.fromEntries([...this.serverStats].map(([n, s]) => [n, { ...s }])),
+    };
+  }
+
   private start(name: string): void {
     if (this.running.has(name)) return;
     const controller = new AbortController();
@@ -183,15 +310,33 @@ export class ServerPool {
     const o = this.runOptions;
     if (!api || !o) return;
     const saveTo = o.saveDir ? `${o.saveDir.replace(/[\\/]+$/, "")}/${await fileName(name)}.json` : undefined;
+    const stats = this.serverStats.get(name) ?? { polls: 0, errors: 0 };
+    this.serverStats.set(name, stats);
+    const onPoll = (data: ServerData) => {
+      const now = Date.now();
+      if (stats.lastPoll !== undefined) {
+        const gap = (now - stats.lastPoll) / 1000;
+        stats.interval = stats.interval === undefined ? gap : stats.interval * 0.7 + gap * 0.3;
+      }
+      stats.lastPoll = now;
+      stats.polls += 1;
+      stats.errors = 0;
+      stats.online = Boolean(data.Online);
+      stats.players = data.Server?.CurrentPlayers;
+    };
     try {
       await api.run(this.handlers, (fn, arg) => fn(name, arg), {
         sections: o.sections, limit: o.limit, skipExisting: o.skipExisting, saveTo,
-        adaptive: o.adaptive, maxIdle: o.maxIdle, signal,
+        // Carry on from a position kept in memory (after updateKey) unless saveDir has one.
+        cursor: saveTo ? undefined : api.cursor,
+        adaptive: o.adaptive, maxIdle: o.maxIdle, signal, onPoll,
+        onError: () => { stats.errors += 1; },
       });
     } catch (err) {
       const permanent = isPermanent(err);
       console.error(`[oxrpy] Stopped following ${name}${permanent ? "" : " after an unexpected error"}:`, (err as Error)?.message ?? err);
       this.failed.set(name, err);
+      stats.failed = err;
       for (const fn of this.handlers.get("error")) {
         try {
           await fn(name, err as OxfordAPIError);

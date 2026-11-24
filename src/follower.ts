@@ -51,9 +51,11 @@ export interface Poll {
 }
 
 /** Anything that can fetch `GET /v1/server` (the client). */
-/** Anything that can fetch `GET /v1/server` (the client). */
 export interface ServerDataSource {
-  getServerData(sections?: string[], options?: { since?: number; limit?: number }): Promise<ServerData | null>;
+  getServerData(
+    sections?: string[],
+    options?: { since?: number; limit?: number; background?: boolean; signal?: AbortSignal },
+  ): Promise<ServerData | null>;
 }
 
 /**
@@ -109,10 +111,15 @@ export class LogFollower implements AsyncIterable<Poll> {
     }
   }
 
-  /** Make one request. Errors are thrown, not retried. */
-  async poll(): Promise<Poll> {
+  /**
+   * Make one request. Errors are thrown, not retried. It waits behind your own requests for a
+   * rate limit slot; `signal` gives up waiting.
+   */
+  async poll(signal?: AbortSignal): Promise<Poll> {
     await this.ready();
-    const data = await this.api.getServerData([...this.logs, ...this.sections], { since: this.cursor, limit: this.limit });
+    const data = await this.api.getServerData([...this.logs, ...this.sections], {
+      since: this.cursor, limit: this.limit, background: true, signal,
+    });
     if (!data) throw new OxfordAPIError("Empty response");
     return { data, fresh: this.process(data) };
   }
@@ -167,8 +174,9 @@ export class LogFollower implements AsyncIterable<Poll> {
     while (!signal?.aborted) {
       let result: Poll;
       try {
-        result = await this.poll();
+        result = await this.poll(signal);
       } catch (err) {
+        if (signal?.aborted) break; // stopped while waiting for its turn: nothing was handled
         if (!(err instanceof OxfordAPIError) || !retry || isPermanent(err)) throw err;
         this.failures += 1;
         const delay = errorDelay(err, this.failures);

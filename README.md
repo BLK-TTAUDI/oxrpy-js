@@ -205,28 +205,70 @@ touched.
 <!-- --8<-- [start:many-servers] -->
 ## Many servers in one app
 
+If you're building something lots of servers use (a Discord bot, a CAD, a dashboard), each
+server's owner gives your app their server key. `ServerPool` follows all of them with one set of
+handlers, and shares Oxford's rate limits between them fairly:
+
 ```js
 import { ServerPool } from "oxrpy";
 
 const pool = new ServerPool({ appKey: process.env.OXFD_APP_KEY });   // app key optional
-pool.add("guild-1234", keyFromGuild1234);
 
-pool.on("Kill", (server, kill) => postToGuild(server, kill));
-pool.on("error", (server, err) => console.log(server, err.message));
+// When someone links their server (a /link command, say), check the key first.
+const info = await pool.verify(serverKey);   // AuthenticationError if it's wrong
+pool.add("guild-1234", serverKey);           // followed straight away if the pool's running
+console.log(`Linked to ${info.Name}`);
 
-await pool.runForever({ saveDir: "positions" });
+pool.on("Kill", (server, kill) => postToGuild(server, kill));   // the server's name comes first
+pool.on("error", (server, err) => tellGuild(server, `Lost touch with your server: ${err.message}`));
+
+await pool.runForever({ sections: ["Players"], saveDir: "positions" });
 ```
 
-- **Shared limits:** with an app key, every server's requests are paced together, because your
-  app's limits count across all of them.
+- **Fair turns:** when there's more to check than the limit allows, servers take turns, so none
+  is left behind. Busy servers are checked more often than quiet and empty ones (which wait up to
+  5 seconds, or `maxIdle`).
+- **Your own requests first:** requests you make yourself, like a `/players` command's, go ahead
+  of background polling, so they stay quick however many servers the pool follows.
+  `pool.each()` and `pool.runCommandOnAll()` wait behind them too.
+- **Reuse what the pool already has:** with `sections: ["Players"]` every poll brings the player
+  list too, so `await pool.get("guild-1234").getPlayers({ maxAge: 10 })` answers without a
+  request. Every live helper takes `maxAge`.
 - **Bad keys don't spread:** a server whose key stops working is dropped, reported to your
-  `error` handler and listed in `pool.failed`. The others carry on.
-- **Quieter polling for quiet servers:** quiet and empty servers are checked less often (up to
-  every 5 seconds), so one app can follow many more servers.
+  `error` handler and listed in `pool.failed`. The others carry on. When the owner gives you a
+  new key, `await pool.updateKey("guild-1234", newKey)` carries on from where it stopped.
 - **Add and remove while running:** `pool.add()` and `await pool.remove()` work at any time.
-- **Each server's client:** `pool.get(name)` gives it to you.
-- **Everything at once:** `pool.each(api => ...)` and `pool.runCommandOnAll(...)` act on every
-  server.
+- **Restarts don't miss anything:** `saveDir` keeps each server's place in its logs.
+- **Custom limits just work:** with an app key, the pool follows the limits Oxford reports, so a
+  higher tier needs no settings.
+- **See how it's keeping up:** `pool.stats` has overall figures and each server's:
+
+```js
+const stats = pool.stats;
+console.log(`${stats.following} servers, each updated about every ${stats.averageInterval?.toFixed(1)}s`);
+console.log(stats.perServer["guild-1234"].interval, stats.readLimit, stats.waiting);
+```
+
+### How many servers can one app follow?
+
+Every request from one IP address counts towards Oxford's limit of 30 a second, whatever the key.
+With an app key, your app's own limit (20 a second on the standard tier) is shared by every
+server too. Each server needs one request per check, so the more servers, the longer each waits
+for its turn:
+
+| Servers | Each one checked about every (no app key) | (standard app key) |
+| --- | --- | --- |
+| up to 30 | 1 to 5 seconds, as often as it's useful | 1.5 to 5 seconds |
+| 100 | 3.5 seconds | 5 seconds |
+| 300 | 10 seconds | 15 seconds |
+| 1,000 | 35 seconds | 50 seconds |
+
+Nothing is missed when it's slower: each check picks up everything since the last one. It just
+arrives later. `pool.stats` shows the real figures for your app.
+
+To go further, ask Oxford Roleplay for an app key with higher limits (the pool picks them up by
+itself), or run your app on more than one IP address, each with its own share of the servers.
+An Unlimited app key isn't held to the per-IP limit: pass `rateLimit: "none"` to turn pacing off.
 
 <!-- --8<-- [end:many-servers] -->
 <!-- --8<-- [start:map] -->
