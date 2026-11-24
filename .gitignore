@@ -3,4 +3,3 @@ dist/
 coverage/
 *.tgz
 .oxrpy-state/
-.release-notes.md
