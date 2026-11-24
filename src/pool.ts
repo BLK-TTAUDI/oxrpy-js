@@ -19,6 +19,7 @@ import type { OxfordAPIError } from "./errors.js";
 import { Handlers, type EventKey, type EventMap } from "./events.js";
 import { isApiProblem, isPermanent } from "./follower.js";
 import { TokenBucket } from "./ratelimit.js";
+import { trimEnd } from "./text.js";
 import type { Event, ServerData, ServerInfo } from "./types.js";
 
 /** Every request from one IP address, whatever the key: 30 a second. */
@@ -435,7 +436,7 @@ export class ServerPool {
     const api = this.servers.get(name);
     const o = this.runOptions;
     if (!api || !o) return;
-    const saveTo = o.saveDir ? `${o.saveDir.replace(/[\\/]+$/, "")}/${await fileName(name)}.json` : undefined;
+    const saveTo = o.saveDir ? `${trimEnd(o.saveDir, "\\/")}/${await fileName(name)}.json` : undefined;
     const stats = this.serverStats.get(name) ?? { polls: 0, errors: 0 };
     this.serverStats.set(name, stats);
     const onPoll = (data: ServerData) => {

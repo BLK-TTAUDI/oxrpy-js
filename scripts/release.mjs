@@ -99,7 +99,12 @@ try {
   hasGh = false;
 }
 if (hasGh) {
-  const section = read("CHANGELOG.md").match(new RegExp(`^## ${version.replace(/\./g, "\\.")}\\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, "m"));
+  // This version's section: from its heading to the next one (plain text search, no regex built from input)
+  const text = read("CHANGELOG.md");
+  const heading = `## ${version}\n`;
+  const start = text.indexOf(heading);
+  const next = start === -1 ? -1 : text.indexOf("\n## ", start + heading.length);
+  const section = start === -1 ? null : [null, text.slice(start + heading.length, next === -1 ? undefined : next)];
   const notesPath = ".release-notes.md";
   write(notesPath, `${section ? section[1].trim() : ""}\n\n\`\`\`\nnpm install oxrpy@${version}\n\`\`\`\n`);
   try {

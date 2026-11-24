@@ -14,6 +14,7 @@ import { LiveState } from "./live.js";
 import * as lookup from "./lookup.js";
 import { TokenBucket } from "./ratelimit.js";
 import type { StateStore } from "./state.js";
+import { trimEnd } from "./text.js";
 import { sleep } from "./util.js";
 import { CommandWindow, chunk, planGroupChanges, planStaffChanges, type UserKey } from "./sync.js";
 import type {
@@ -136,7 +137,7 @@ function checkBaseUrl(baseUrl: string): string {
   if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) {
     throw new TypeError(`baseUrl must be an https:// URL, so your key is never sent unencrypted: ${JSON.stringify(baseUrl)}`);
   }
-  return baseUrl.replace(/\/+$/, "");
+  return trimEnd(baseUrl, "/");
 }
 
 function retryAfterMs(headers: Headers, body: unknown): number | undefined {
