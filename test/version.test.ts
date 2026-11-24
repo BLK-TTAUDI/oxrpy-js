@@ -17,3 +17,8 @@ it("README points to the docs site", () => {
   expect(readme).toContain("https://oxrpy.org");
   expect(readme).not.toContain("--8<--"); // the docs site no longer pulls sections from here
 });
+
+it("the newest released version in the changelog is this one", () => {
+  const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+  expect(changelog.match(/^## (\d+\.\d+\.\d+)/m)?.[1]).toBe(VERSION);
+});

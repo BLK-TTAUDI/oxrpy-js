@@ -10,9 +10,37 @@ export interface AcquireOptions {
 }
 
 interface Waiter {
-  priority: number;
   resolve: (got: boolean) => void;
   done: boolean;
+}
+
+/** A first-in, first-out queue that stays fast with thousands of entries (no `Array.shift`). */
+class Fifo<T> {
+  private items: T[] = [];
+  private head = 0;
+
+  get length(): number {
+    return this.items.length - this.head;
+  }
+
+  push(item: T): void {
+    this.items.push(item);
+  }
+
+  peek(): T | undefined {
+    return this.items[this.head];
+  }
+
+  shift(): T | undefined {
+    const item = this.items[this.head];
+    this.head += 1;
+    // Drop the used front now and then, so the array doesn't grow forever.
+    if (this.head > 1024 && this.head * 2 > this.items.length) {
+      this.items = this.items.slice(this.head);
+      this.head = 0;
+    }
+    return item;
+  }
 }
 
 /**
@@ -27,7 +55,10 @@ export class TokenBucket {
   capacity: number;
   private tokens: number;
   private updated: number;
-  private readonly waiters: Waiter[] = [];
+  /** One queue per priority, best first. */
+  private readonly queues = new Map<number, Fifo<Waiter>>();
+  private priorities: number[] = [];
+  private live = 0;
   private timer?: ReturnType<typeof setTimeout>;
 
   constructor(rate: number, capacity: number) {
@@ -46,7 +77,7 @@ export class TokenBucket {
 
   /** How many requests are queued for a token right now. */
   get waiting(): number {
-    return this.waiters.filter((w) => !w.done).length;
+    return this.live;
   }
 
   /** Change the steady rate (and the burst), e.g. when the API reports a different limit. */
@@ -62,9 +93,8 @@ export class TokenBucket {
 
   /** Take a token if one is free right now and nobody's queued for it. */
   tryAcquire(): boolean {
-    while (this.waiters.length && this.waiters[0].done) this.waiters.shift();
     this.refill();
-    if (this.tokens >= 1 && !this.waiters.length) {
+    if (this.tokens >= 1 && this.live === 0) {
       this.tokens -= 1;
       return true;
     }
@@ -84,32 +114,51 @@ export class TokenBucket {
       const finish = (got: boolean) => {
         if (waiter.done) return;
         waiter.done = true;
+        this.live -= 1;
         if (timeout) clearTimeout(timeout);
         signal?.removeEventListener("abort", giveUp);
         resolve(got);
       };
       const giveUp = () => finish(false);
-      const waiter: Waiter = { priority, resolve: finish, done: false };
-      // Sorted by priority, then arrival (so usually just a push).
-      let at = this.waiters.length;
-      while (at > 0 && this.waiters[at - 1].priority > priority) at -= 1;
-      this.waiters.splice(at, 0, waiter);
+      const waiter: Waiter = { resolve: finish, done: false };
+      this.queue(priority).push(waiter);
+      this.live += 1;
       if (timeoutMs !== undefined && Number.isFinite(timeoutMs)) timeout = setTimeout(giveUp, Math.max(0, timeoutMs));
       signal?.addEventListener("abort", giveUp, { once: true });
       this.schedule();
     });
   }
 
-  /** Hand out tokens to the waiters, best priority first, then first come first served. */
+  private queue(priority: number): Fifo<Waiter> {
+    let queue = this.queues.get(priority);
+    if (!queue) {
+      queue = new Fifo<Waiter>();
+      this.queues.set(priority, queue);
+      this.priorities = [...this.queues.keys()].sort((a, b) => a - b);
+    }
+    return queue;
+  }
+
+  /** The next waiter still waiting: best priority first, then first come first served. */
+  private next(): Fifo<Waiter> | undefined {
+    for (const priority of this.priorities) {
+      const queue = this.queues.get(priority)!;
+      while (queue.length && queue.peek()!.done) queue.shift(); // gave up
+      if (queue.length) return queue;
+    }
+    return undefined;
+  }
+
+  /** Hand out tokens to the waiters in turn. */
   private schedule(): void {
     if (this.timer) return;
     for (;;) {
-      while (this.waiters.length && this.waiters[0].done) this.waiters.shift();
-      if (!this.waiters.length) return;
+      const queue = this.next();
+      if (!queue) return;
       this.refill();
       if (this.tokens < 1) break;
       this.tokens -= 1;
-      this.waiters.shift()!.resolve(true);
+      queue.shift()!.resolve(true);
     }
     const wait = ((1 - this.tokens) / this.rate) * 1000;
     this.timer = setTimeout(() => {

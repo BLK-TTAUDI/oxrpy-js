@@ -188,6 +188,8 @@ export class OxfordAPI {
   ipBucket?: TokenBucket;
   /** @internal the priority for requests with none of their own (ServerPool.each uses 1) */
   defaultPriority = 0;
+  /** @internal awaited before each background poll (ServerPool holds polls back while the API is down) */
+  gate?: (signal?: AbortSignal) => Promise<void>;
   /** With an app key on "auto", follow the limits Oxford reports (custom tiers differ). */
   private readonly followLimits: boolean;
   private readonly handlers = new Handlers<Handler<any>>();
@@ -249,6 +251,13 @@ export class OxfordAPI {
     const priority = spec.priority ?? this.defaultPriority;
     const wait = { priority, timeoutMs: priority > 0 ? undefined : 60_000, signal: spec.signal };
     const stopped = () => new OxfordAPIError(`${spec.method} ${spec.path} was stopped`);
+    // Background polls don't retry here: the poll loop does, and the pool needs to hear about
+    // failures straight away to spot an outage.
+    const background = priority > 0 && spec.serverData === true;
+    if (background && this.gate) {
+      await this.gate(spec.signal);
+      if (spec.signal?.aborted) throw stopped();
+    }
     for (;;) {
       if (bucket && !(await bucket.acquire(wait))) {
         if (spec.signal?.aborted) throw stopped();
@@ -273,7 +282,7 @@ export class OxfordAPI {
       } catch (err) {
         if (spec.signal?.aborted) throw stopped();
         // Commands may have run, so only reads are retried.
-        const retry = spec.method === "GET" && attempt < this.maxRetries;
+        const retry = spec.method === "GET" && attempt < this.maxRetries && !background;
         this.afterAttempt(spec, undefined, undefined, started, attempt, err, retry);
         if (!retry) {
           const timedOut = (err as Error)?.name === "TimeoutError" || (err as Error)?.name === "AbortError";
@@ -293,7 +302,8 @@ export class OxfordAPI {
           body = null;
         }
       }
-      const delay = this.retryDelay(spec, response.status, response.headers, body, attempt);
+      let delay = this.retryDelay(spec, response.status, response.headers, body, attempt);
+      if (background && response.status !== 429) delay = undefined;
       this.afterAttempt(spec, response.status, response.headers, started, attempt, undefined, delay !== undefined);
       if (delay !== undefined) {
         attempt += 1;
@@ -753,12 +763,20 @@ export class OxfordAPI {
   async run(
     handlers: Handlers<any>,
     invoke: (fn: any, arg: unknown) => unknown,
-    options: RunForeverOptions & { onError?: (err: OxfordAPIError) => unknown; onPoll?: (data: ServerData) => unknown },
+    options: RunForeverOptions & {
+      onError?: (err: OxfordAPIError) => unknown;
+      onPoll?: (data: ServerData) => unknown;
+      maxApiErrorDelay?: number;
+      wake?: () => Promise<void>;
+    },
   ): Promise<void> {
     const follower = new LogFollower(this, handlers.logsNeeded(), options);
     // Load any saved position before deciding whether to skip the backlog.
     await follower.ready();
     let skip = (options.skipExisting ?? true) && follower.cursor === undefined;
+    if (skip) follower.skipBacklog();
+    if (options.maxApiErrorDelay !== undefined) follower.maxApiErrorDelay = options.maxApiErrorDelay;
+    follower.wake = options.wake;
     const watcher = new ServerWatcher();
     const call = async (fn: any, arg: unknown) => {
       try {

@@ -52,7 +52,8 @@ describe("runForever", () => {
     const caught: number[] = [];
     api.on("speedcamera", (e) => { caught.push(e.SpeedMph as number); api.stop(); });
     await api.runForever();
-    expect(Object.fromEntries(calls[0].url.searchParams)).toEqual({ Events: "true" });
+    // The first poll only needs the newest entry, since what's already there is skipped
+    expect(Object.fromEntries(calls[0].url.searchParams)).toEqual({ Events: "true", Limit: "1" });
     expect(caught).toEqual([61]);
   });
 

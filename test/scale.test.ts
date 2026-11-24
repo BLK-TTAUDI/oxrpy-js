@@ -5,6 +5,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationError, LogFollower, OxfordAPI, ServerPool, TokenBucket } from "../src/index.js";
+import { OutageGate } from "../src/pool.js";
 import { TOP, fakeFetch, ok, type Call, type Reply } from "./helpers.js";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -222,5 +223,95 @@ describe("ServerPool at scale", () => {
     await running;
     expect(performance.now() - started).toBeLessThan(500); // not 100 queued polls at 5 a second
     expect(pool.stats.waiting).toBe(0);
+  });
+});
+
+describe("outages and the first poll", () => {
+  it("waits out an API outage together, then everyone carries on", async () => {
+    vi.spyOn(LogFollower.prototype, "nextDelay").mockReturnValue(20);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const minDelay = OutageGate.minDelay;
+    OutageGate.minDelay = 200;
+    try {
+      const state = { down: false, failed: 0, after: new Set<string>() };
+      const { pool } = poolFrom((call) => {
+        if (state.down) {
+          state.failed += 1;
+          return { status: 502, body: { message: "Bad gateway" } };
+        }
+        state.after.add(call.headers.get("server-key")!);
+        return ok(TOP);
+      });
+      for (let i = 0; i < 20; i++) pool.add(`s${i}`, `key-${i}`);
+      pool.on("poll", () => {});
+      const running = pool.runForever();
+      await wait(200);
+      state.down = true;
+      await wait(1000);
+      const down = pool.stats;
+      const failedWhileDown = state.failed;
+      state.down = false;
+      state.after.clear();
+      await wait(1000);
+      const up = pool.stats;
+      pool.stop();
+      await running;
+
+      expect(down.apiDown).toBe(true);
+      expect(failedWhileDown).toBeLessThan(60); // not ~1,000 from every server retrying
+      expect(up.apiDown).toBe(false);
+      expect(state.after.size).toBe(20); // every server came back
+      expect(pool.failed.size).toBe(0);
+    } finally {
+      OutageGate.minDelay = minDelay;
+    }
+  });
+
+  it("doesn't let one broken server hold the others back", async () => {
+    vi.spyOn(LogFollower.prototype, "nextDelay").mockReturnValue(20);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { pool } = poolFrom((call) => call.headers.get("server-key") === "key-0"
+      ? { status: 500, body: { message: "Internal error" } }
+      : ok(TOP));
+    for (let i = 0; i < 10; i++) pool.add(`s${i}`, `key-${i}`);
+    pool.on("poll", () => {});
+    const running = pool.runForever();
+    await wait(500);
+    const stats = pool.stats;
+    pool.stop();
+    await running;
+    expect(stats.apiDown).toBe(false);
+    expect(stats.perServer.s1.polls).toBeGreaterThan(5);
+  });
+
+  it("only fetches the newest entry on the first poll", async () => {
+    vi.spyOn(LogFollower.prototype, "nextDelay").mockReturnValue(10);
+    const replies = [
+      { ...TOP, Cursor: 9, KillLogs: [{ Seq: 9, Type: "Kill" }] },
+      { ...TOP, Cursor: 11, KillLogs: [{ Seq: 11, Type: "Kill" }, { Seq: 8, Type: "Kill" }] },
+    ];
+    const { fetch, calls } = fakeFetch(() => ok(replies[Math.min(calls.length, replies.length) - 1]));
+    const api = new OxfordAPI({ serverKey: "sk", rateLimit: "none", fetch });
+    const seen: number[] = [];
+    api.on("Kill", (kill) => { seen.push(kill.Seq!); api.stop(); });
+    await api.runForever();
+    expect(calls[0].url.searchParams.get("Limit")).toBe("1");
+    expect(calls[1].url.searchParams.get("Limit")).toBeNull();
+    expect(calls[1].url.searchParams.get("Since")).toBe("9");
+    expect(seen).toEqual([11]); // 8 was older than what the first poll saw, so it isn't news
+  });
+});
+
+describe("the queue at scale", () => {
+  it("hands out 10,000 turns in order, quickly", async () => {
+    // Enough tokens come back within one timer tick for everyone, so this times the queue itself.
+    const bucket = new TokenBucket(1_000_000_000, 10_000);
+    bucket.drain();
+    const order: number[] = [];
+    const started = performance.now();
+    await Promise.all(Array.from({ length: 10_000 }, (_, i) => bucket.acquire({ priority: 1 }).then(() => order.push(i))));
+    expect(order).toEqual(Array.from({ length: 10_000 }, (_, i) => i));
+    expect(bucket.waiting).toBe(0);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });

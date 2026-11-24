@@ -29,6 +29,7 @@
     "build": "npm run clean && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "coverage": "vitest run --coverage",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "fixtures": "node scripts/sync-fixtures.mjs"
@@ -57,6 +58,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "@vitest/coverage-v8": "^5.1.1",
     "typescript": "^7.0.2",
     "vitest": "^5.1.1"
   }

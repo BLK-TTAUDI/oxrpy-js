@@ -14,6 +14,15 @@ export function isPermanent(err: unknown): boolean {
     || err instanceof NotFoundError || err instanceof EndpointRemovedError;
 }
 
+/**
+ * A problem with Oxford's API itself (unreachable, timing out, or a 5xx other than 503, which means
+ * the game server's offline), rather than with one server or its key.
+ */
+export function isApiProblem(err: unknown): boolean {
+  if (!(err instanceof OxfordAPIError) || err instanceof RateLimitError) return false;
+  return err.status === undefined || (err.status >= 500 && err.status !== 503);
+}
+
 /** How long to wait after the `failures`-th failure in a row (ms). */
 export function errorDelay(err: OxfordAPIError, failures: number): number {
   if (err instanceof RateLimitError && err.retryAfter) return Math.max(1, err.retryAfter) * 1000;
@@ -83,8 +92,20 @@ export class LogFollower implements AsyncIterable<Poll> {
   resumed = false;
   readonly adaptive: boolean;
   readonly maxIdle: number;
+  /**
+   * The longest wait after an API problem (see `isApiProblem`), in ms. The pool lowers it, because
+   * it watches for outages itself and holds every server back together.
+   */
+  maxApiErrorDelay = 60_000;
   private readonly store?: StateStore;
   private loaded = false;
+  /** Ask for just the newest entry of each log next time (set by `skipBacklog()`). */
+  private light = false;
+  /**
+   * Raced with the wait after an error: when it resolves, the wait is cut short. The pool uses it
+   * to wake servers as soon as an outage is spotted or is over.
+   */
+  wake?: () => Promise<void>;
 
   constructor(private readonly api: ServerDataSource, logs: string[] = ["Events"], options: FollowOptions = {}) {
     this.logs = logs.map(sectionName);
@@ -112,13 +133,22 @@ export class LogFollower implements AsyncIterable<Poll> {
   }
 
   /**
+   * Make the first poll fetch only the newest entry of each log: enough to know where each log is
+   * up to, when what's already there won't be handled anyway. Much less to download, which adds up
+   * for an app starting hundreds of servers. Call it after `ready()`.
+   */
+  skipBacklog(): void {
+    if (this.cursor === undefined && this.logs.length) this.light = true;
+  }
+
+  /**
    * Make one request. Errors are thrown, not retried. It waits behind your own requests for a
    * rate limit slot; `signal` gives up waiting.
    */
   async poll(signal?: AbortSignal): Promise<Poll> {
     await this.ready();
     const data = await this.api.getServerData([...this.logs, ...this.sections], {
-      since: this.cursor, limit: this.limit, background: true, signal,
+      since: this.cursor, limit: this.light ? 1 : this.limit, background: true, signal,
     });
     if (!data) throw new OxfordAPIError("Empty response");
     return { data, fresh: this.process(data) };
@@ -139,6 +169,7 @@ export class LogFollower implements AsyncIterable<Poll> {
     if (data.Cursor !== undefined && data.Cursor !== null) this.cursor = data.Cursor;
     this.last = data;
     this.failures = 0;
+    this.light = false;
     this.quietPolls = Object.values(fresh).some((list) => list.length) ? 0 : this.quietPolls + 1;
     return fresh;
   }
@@ -179,15 +210,29 @@ export class LogFollower implements AsyncIterable<Poll> {
         if (signal?.aborted) break; // stopped while waiting for its turn: nothing was handled
         if (!(err instanceof OxfordAPIError) || !retry || isPermanent(err)) throw err;
         this.failures += 1;
-        const delay = errorDelay(err, this.failures);
+        let delay = errorDelay(err, this.failures);
+        if (isApiProblem(err)) delay = Math.min(delay, this.maxApiErrorDelay);
         console.warn(`[oxrpy] Polling failed (${err.message}); trying again in ${Math.round(delay / 1000)}s`);
         await onError?.(err);
-        await sleep(delay, signal);
+        await this.waitAfterError(delay, signal);
         continue;
       }
       yield result;
       await this.save(); // only once the caller has dealt with this poll
       await sleep(this.nextDelay(result.data), signal);
+    }
+  }
+
+  private async waitAfterError(delay: number, signal?: AbortSignal): Promise<void> {
+    if (!this.wake) return sleep(delay, signal);
+    const cut = new AbortController();
+    const stop = () => cut.abort();
+    signal?.addEventListener("abort", stop, { once: true });
+    this.wake().then(stop, stop);
+    try {
+      await sleep(delay, cut.signal);
+    } finally {
+      signal?.removeEventListener("abort", stop);
     }
   }
 

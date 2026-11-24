@@ -17,7 +17,7 @@
 import { OxfordAPI, type ClientOptions } from "./client.js";
 import type { OxfordAPIError } from "./errors.js";
 import { Handlers, type EventKey, type EventMap } from "./events.js";
-import { isPermanent } from "./follower.js";
+import { isApiProblem, isPermanent } from "./follower.js";
 import { TokenBucket } from "./ratelimit.js";
 import type { Event, ServerData, ServerInfo } from "./types.js";
 
@@ -73,12 +73,138 @@ export interface PoolStats {
   requestsPerSecond: number;
   /** Requests queued for a rate limit slot right now. */
   waiting: number;
+  /** True while Oxford's API looks down and the pool is holding polls back until it answers. */
+  apiDown: boolean;
   /** The average of the servers' `interval`: typical seconds between updates. */
   averageInterval?: number;
   /** The longest `interval`: the most out of date any server gets. */
   slowestInterval?: number;
   /** Each server's stats, by name. */
   perServer: Record<string, ServerStats>;
+}
+
+/** Events in the last `seconds`, counted in one-second buckets: cheap however busy it gets. */
+class RecentCount {
+  private readonly buckets: Array<[second: number, count: number]> = [];
+  constructor(private readonly seconds = 10) {}
+
+  add(): void {
+    const second = Math.floor(performance.now() / 1000);
+    const last = this.buckets[this.buckets.length - 1];
+    if (last && last[0] === second) last[1] += 1;
+    else {
+      this.buckets.push([second, 1]);
+      while (this.buckets.length && this.buckets[0][0] <= second - this.seconds) this.buckets.shift();
+    }
+  }
+
+  total(): number {
+    const second = Math.floor(performance.now() / 1000);
+    return this.buckets.reduce((sum, [at, count]) => (at > second - this.seconds ? sum + count : sum), 0);
+  }
+}
+
+/**
+ * Holds every server's polling back together while Oxford's API itself is down.
+ *
+ * Without it each server would keep retrying on its own; with hundreds of servers that's hundreds
+ * of failing requests, and the pool would only notice the API was back as each server's own wait ran
+ * out. Instead, once most servers are failing together, polls wait here and one at a time is let
+ * through as a probe (after 2 s, then 4, 8... up to a minute). The first poll that works opens the
+ * gate for everyone.
+ * @internal
+ */
+export class OutageGate {
+  static minDelay = 2000;
+  static maxDelay = 60_000;
+  delay = 0; // 0 while all is well
+  failures = 0;
+  private until = 0;
+  private probing = false;
+  private waiters = new Set<() => void>();
+  private timer?: ReturnType<typeof setTimeout>;
+  private changes = new Set<() => void>();
+
+  get closed(): boolean {
+    return this.delay > 0;
+  }
+
+  succeeded(): void {
+    this.failures = 0;
+    if (!this.closed) return;
+    console.warn("[oxrpy] Oxford's API is answering again; carrying on");
+    this.delay = 0;
+    this.probing = false;
+    this.wakeAll();
+    this.notify();
+  }
+
+  failed(servers: number): void {
+    this.failures += 1;
+    if (this.closed) {
+      if (!this.probing) return; // a poll that was already on its way when the gate closed
+      this.probing = false;
+    } else if (this.failures < Math.max(3, Math.ceil(servers / 2))) {
+      return;
+    }
+    const justClosed = !this.closed;
+    this.delay = Math.min(OutageGate.maxDelay, Math.max(OutageGate.minDelay, this.delay * 2));
+    this.until = performance.now() + this.delay;
+    if (justClosed) this.notify();
+    console.warn(`[oxrpy] Oxford's API looks down (${this.failures} failed polls in a row); trying again in ${Math.round(this.delay / 1000)}s`);
+    this.schedule();
+  }
+
+  /** Resolves when the gate next closes (an outage is spotted) or opens (it's over). */
+  changed(): Promise<void> {
+    return new Promise((resolve) => {
+      this.changes.add(resolve);
+    });
+  }
+
+  private notify(): void {
+    const changes = [...this.changes];
+    this.changes.clear();
+    for (const resolve of changes) resolve();
+  }
+
+  /** Resolves when a poll may go: straight away normally, or as the next probe during an outage. */
+  async wait(signal?: AbortSignal): Promise<void> {
+    while (this.closed && !signal?.aborted) {
+      if (performance.now() >= this.until) {
+        this.until = performance.now() + this.delay; // this poll is the probe
+        this.probing = true;
+        this.schedule();
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          this.waiters.delete(done);
+          signal?.removeEventListener("abort", done);
+          resolve();
+        };
+        this.waiters.add(done);
+        signal?.addEventListener("abort", done, { once: true });
+        this.schedule();
+      });
+    }
+  }
+
+  private schedule(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    if (!this.closed || !this.waiters.size) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.wakeAll();
+    }, Math.max(1, this.until - performance.now()));
+  }
+
+  private wakeAll(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    for (const wake of [...this.waiters]) wake();
+  }
 }
 
 /** A safe file name for a server's position; changed names get a short hash so they never collide. */
@@ -104,7 +230,8 @@ export class ServerPool {
   private runOptions?: PoolRunOptions;
   private stopController?: AbortController;
   private readonly serverStats = new Map<string, ServerStats>();
-  private readonly sent: number[] = [];
+  private readonly sent = new RecentCount();
+  private readonly outage = new OutageGate();
 
   constructor(options: PoolOptions = {}) {
     this.options = options;
@@ -135,10 +262,9 @@ export class ServerPool {
     const api = new OxfordAPI({ ...this.options, serverKey });
     if (this.sharedLimiters) api.limiters = this.sharedLimiters;
     api.ipBucket = this.ipBucket;
+    api.gate = (signal) => this.outage.wait(signal);
     api.onRequest((info) => {
-      if (info.status === undefined) return;
-      this.sent.push(performance.now());
-      if (this.sent.length > 100_000) this.sent.splice(0, this.sent.length - 100_000);
+      if (info.status !== undefined) this.sent.add();
     });
     return api;
   }
@@ -271,8 +397,7 @@ export class ServerPool {
    * ```
    */
   get stats(): PoolStats {
-    const since = performance.now() - 10_000;
-    const recent = this.sent.filter((t) => t >= since).length;
+    const recent = this.sent.total();
     const all = [...this.serverStats.values()];
     const intervals = all.filter((s) => s.interval !== undefined && s.failed === undefined).map((s) => s.interval!);
     const buckets = [this.sharedLimiters?.data, this.ipBucket].filter((b) => b !== undefined);
@@ -283,6 +408,7 @@ export class ServerPool {
       readLimit: this.readLimit,
       requestsPerSecond: recent / 10,
       waiting: Math.max(0, ...buckets.map((b) => b!.waiting)),
+      apiDown: this.outage.closed,
       averageInterval: intervals.length ? intervals.reduce((a, b) => a + b, 0) / intervals.length : undefined,
       slowestInterval: intervals.length ? Math.max(...intervals) : undefined,
       perServer: Object.fromEntries([...this.serverStats].map(([n, s]) => [n, { ...s }])),
@@ -323,6 +449,7 @@ export class ServerPool {
       stats.errors = 0;
       stats.online = Boolean(data.Online);
       stats.players = data.Server?.CurrentPlayers;
+      this.outage.succeeded();
     };
     try {
       await api.run(this.handlers, (fn, arg) => fn(name, arg), {
@@ -330,10 +457,20 @@ export class ServerPool {
         // Carry on from a position kept in memory (after updateKey) unless saveDir has one.
         cursor: saveTo ? undefined : api.cursor,
         adaptive: o.adaptive, maxIdle: o.maxIdle, signal, onPoll,
-        onError: () => { stats.errors += 1; },
+        // The outage gate does the long waiting, so a server comes back soon after the API.
+        maxApiErrorDelay: 5000,
+        // A server waiting after an error goes again as soon as an outage is spotted (to wait at
+        // the gate) or is over.
+        wake: () => this.outage.changed(),
+        onError: (err) => {
+          stats.errors += 1;
+          if (isApiProblem(err)) this.outage.failed([...this.running.keys()].length);
+          else this.outage.succeeded(); // the API answered (e.g. "server offline"), so it's up
+        },
       });
     } catch (err) {
       const permanent = isPermanent(err);
+      if (permanent) this.outage.succeeded(); // the API answered, so it's up
       console.error(`[oxrpy] Stopped following ${name}${permanent ? "" : " after an unexpected error"}:`, (err as Error)?.message ?? err);
       this.failed.set(name, err);
       stats.failed = err;
