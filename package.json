@@ -44,6 +44,10 @@
   "author": "BLK-TTAUDI",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://oxrpy.org",
+  "funding": {
+    "type": "buymeacoffee",
+    "url": "https://buymeacoffee.com/blk_ttaudi"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BLK-TTAUDI/oxrpy-js.git"

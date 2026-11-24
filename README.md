@@ -296,6 +296,11 @@ can copy and run:
 - **No dependencies,** so nothing extra comes along when you install it.
 
 <!-- --8<-- [end:security] -->
+## Support
+
+oxrpy is free to use. If it's saved you some time, you can
+[buy me a coffee](https://buymeacoffee.com/blk_ttaudi) to help keep it going.
+
 <!-- --8<-- [start:license] -->
 ## License
 
