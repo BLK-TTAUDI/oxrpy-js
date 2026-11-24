@@ -42,5 +42,5 @@ export function sectionName(name: string): string {
   return LOOKUP.get(name.toLowerCase()) ?? name;
 }
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 export const USER_AGENT = `oxrpy-js/${VERSION} (+https://github.com/BLK-TTAUDI/oxrpy-js)`;
