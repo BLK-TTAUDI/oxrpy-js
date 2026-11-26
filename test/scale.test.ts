@@ -315,3 +315,36 @@ describe("the queue at scale", () => {
     expect(performance.now() - started).toBeLessThan(2000);
   });
 });
+
+describe("slow handlers", () => {
+  it("warns about a slow handler and shows it in stats", async () => {
+    vi.spyOn(LogFollower.prototype, "nextDelay").mockReturnValue(10);
+    const warnings: string[] = [];
+    vi.spyOn(console, "warn").mockImplementation((message: string) => { warnings.push(message); });
+    // A clock the handler moves on by 6 seconds, so the test doesn't wait for real
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    let seq = 0;
+    const { pool } = poolFrom(() => ok(entries(++seq)));
+    pool.add("a", "ka");
+    pool.on("Kill", async function slowKillFeed() {
+      now += 6000;
+      pool.stop();
+    });
+    await pool.runForever();
+    expect(warnings.some((w) => w.includes("slowKillFeed") && w.includes("6.0s") && w.includes("oxrpy.org/js/events/#slow-handlers"))).toBe(true);
+    expect(pool.stats.perServer.a.handlerTime).toBeGreaterThanOrEqual(6);
+  });
+
+  it("doesn't warn about quick handlers", async () => {
+    vi.spyOn(LogFollower.prototype, "nextDelay").mockReturnValue(10);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let seq = 0;
+    const { pool } = poolFrom(() => ok(entries(++seq)));
+    pool.add("a", "ka");
+    pool.on("Kill", () => { pool.stop(); });
+    await pool.runForever();
+    expect(warn).not.toHaveBeenCalled();
+    expect(pool.stats.perServer.a.handlerTime).toBeLessThan(1);
+  });
+});

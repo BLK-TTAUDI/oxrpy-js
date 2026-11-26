@@ -56,6 +56,11 @@ export interface ServerStats {
   online?: boolean;
   /** Players in the server at the last poll. */
   players?: number;
+  /**
+   * Seconds your handlers took over the last poll's events. The next poll waits for them, so if this
+   * is high, that server's events are arriving late (hand slow work off; see the docs).
+   */
+  handlerTime?: number;
   /** Why following stopped for good (e.g. the key was regenerated). */
   failed?: unknown;
 }
@@ -458,6 +463,7 @@ export class ServerPool {
         // Carry on from a position kept in memory (after updateKey) unless saveDir has one.
         cursor: saveTo ? undefined : api.cursor,
         adaptive: o.adaptive, maxIdle: o.maxIdle, signal, onPoll,
+        onHandled: (seconds) => { stats.handlerTime = seconds; },
         // The outage gate does the long waiting, so a server comes back soon after the API.
         maxApiErrorDelay: 5000,
         // A server waiting after an error goes again as soon as an outage is spotted (to wait at

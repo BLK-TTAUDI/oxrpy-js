@@ -8,7 +8,7 @@ import {
   AuthenticationError, BadRequestError, CommandFailedError, EndpointRemovedError, NotFoundError,
   OxfordAPIError, RateLimitError, ServerOfflineError, closestMatch,
 } from "./errors.js";
-import { Handlers, ServerWatcher, dispatchPlan, type EventKey, type EventMap, type Handler } from "./events.js";
+import { Handlers, ServerWatcher, dispatchPlan, warnIfSlow, type EventKey, type EventMap, type Handler } from "./events.js";
 import { LogFollower, type FollowOptions } from "./follower.js";
 import { LiveState } from "./live.js";
 import * as lookup from "./lookup.js";
@@ -769,6 +769,7 @@ export class OxfordAPI {
       onPoll?: (data: ServerData) => unknown;
       maxApiErrorDelay?: number;
       wake?: () => Promise<void>;
+      onHandled?: (seconds: number) => unknown;
     },
   ): Promise<void> {
     const follower = new LogFollower(this, handlers.logsNeeded(), options);
@@ -780,11 +781,13 @@ export class OxfordAPI {
     follower.wake = options.wake;
     const watcher = new ServerWatcher();
     const call = async (fn: any, arg: unknown) => {
+      const started = performance.now();
       try {
         await invoke(fn, arg);
       } catch (err) {
         console.error(`[oxrpy] Handler ${fn?.name || "(anonymous)"} threw:`, err);
       }
+      warnIfSlow(fn, performance.now() - started);
     };
     const onError = async (err: OxfordAPIError) => {
       await options.onError?.(err);
@@ -792,7 +795,9 @@ export class OxfordAPI {
     };
     for await (const { data, fresh } of follower.iterate({ signal: options.signal, onError })) {
       options.onPoll?.(data);
+      const started = performance.now();
       for (const [fn, arg] of dispatchPlan(handlers, watcher, data, fresh, skip)) await call(fn, arg);
+      options.onHandled?.((performance.now() - started) / 1000);
       skip = false;
     }
     this.cursor = follower.cursor;

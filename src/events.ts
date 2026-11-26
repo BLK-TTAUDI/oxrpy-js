@@ -144,3 +144,19 @@ export function dispatchPlan<F extends (...args: any[]) => unknown>(
   for (const fn of handlers.get("poll")) calls.push([fn, data]);
   return calls;
 }
+
+/** A handler that takes longer than this (ms) gets a warning. */
+export const SLOW_HANDLER_MS = 5000;
+
+/**
+ * Warn about a slow handler. Handlers run one at a time, in the order things happened, and the next
+ * poll waits for them, so a slow one leaves the bot behind without any error.
+ */
+export function warnIfSlow(fn: { name?: string } | undefined, ms: number): void {
+  if (ms < SLOW_HANDLER_MS) return;
+  console.warn(
+    `[oxrpy] Handler ${fn?.name || "(anonymous)"} took ${(ms / 1000).toFixed(1)}s. The next poll waits for handlers, `
+    + "so events are arriving that much later. Hand slow work (a database write, a big upload) off to run "
+    + "separately: https://oxrpy.org/js/events/#slow-handlers",
+  );
+}
