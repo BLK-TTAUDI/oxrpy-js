@@ -57,7 +57,7 @@
     "url": "https://github.com/BLK-TTAUDI/oxrpy-js/issues"
   },
   "devDependencies": {
-    "@types/node": "^24.19.2",
+    "@types/node": "^26.6.6",
     "@vitest/coverage-v8": "^5.1.1",
     "typescript": "^7.0.2",
     "vitest": "^5.1.1"
